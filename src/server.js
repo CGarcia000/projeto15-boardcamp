@@ -349,6 +349,12 @@ server.put('/customers/:id', async (req, res) => {
 
 // rentals
 
+const rentalSchema = joi.object({
+    customerId: joi.number().min(1).required(),
+    gameId: joi.number().min(1).required(),
+    daysRented: joi.number().min(1).required(),
+})
+
 server.get('/rentals', async (req, res) => {
     const { customerId, gameId } = req.query;
     console.log(customerId);
@@ -403,6 +409,147 @@ server.get('/rentals', async (req, res) => {
             rentalsRes.push(element);
         });
         res.send(rentalsRes);
+        return;
+    } catch (error) {
+        console.log(error);
+        res.sendStatus(500);
+    }
+})
+
+server.post('/rentals', async (req, res) => {
+    const validation = rentalSchema.validate(req.body, { abortEarly: false });
+
+    if (validation.error) {
+        const errors = validation.error.details.map(detail => detail.message);
+        res.status(400).send(errors);
+        return;
+    }
+
+    try {
+        //verifica ids
+        const customer = await connection.query(
+            'SELECT id FROM public."customers" WHERE "id" = $1;',
+            [validation.value.customerId]
+        );
+        if (customer.rows.length === 0) {
+            res.status(400).send({ message: 'user not found' });
+            return;
+        }
+
+        const { rows: game } = await connection.query(
+            'SELECT id, "pricePerDay", "stockTotal" FROM public."games" WHERE "id" = $1;',
+            [validation.value.gameId]
+        );
+        if (game.length === 0) {
+            res.status(400).send({ message: "game not found" });
+            return;
+        }
+        // verifica se tem jogos disponíveis
+        const { rows: gamesRented } = await connection.query(
+            `SELECT 
+                "id", "customerId", "gameId", "returnDate"
+                    FROM public."rentals"
+                WHERE "rentals"."gameId" = $1
+                    AND "rentals"."returnDate" IS NULL;`,
+            [validation.value.gameId]
+        );
+        if (gamesRented.length >= game[0].stockTotal) {
+            res.status(400).send({ message: 'this game is not available at the moment' })
+            return;
+        }
+
+        await connection.query(
+            `INSERT INTO public."rentals"
+                ("customerId",
+                "gameId",
+                "rentDate",
+                "daysRented",
+                "originalPrice") 
+                VALUES ($1, $2, $3, $4, $5);`,
+            [
+                validation.value.customerId,
+                validation.value.gameId,
+                new Date(),
+                validation.value.daysRented,
+                game[0].pricePerDay * validation.value.daysRented
+            ]
+        );
+
+        res.sendStatus(201);
+        return;
+    } catch (error) {
+        console.log(error);
+        res.sendStatus(500);
+    }
+})
+
+server.post('/rentals/:id/return', async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const { rows: rent } = await connection.query(
+            `SELECT "rentDate", "daysRented", "returnDate", "originalPrice"
+                FROM public."rentals" WHERE "id" = $1;`,
+            [id]
+        );
+        if (rent.length === 0) {
+            res.status(404).send({ message: 'rental not found' });
+            return;
+        } else if (rent[0].returnDate !== null) {
+            res.status(400).send({ message: 'rental already closed' });
+            return;
+        }
+        const returnDate = new Date();
+        const timeRent = dayjs(returnDate).diff(dayjs(rent[0].rentDate), 'days');
+        if (timeRent >= rent[0].daysRented) {
+            const extra = timeRent - rent[0].daysRented;
+            const pricePerDay = rent[0].originalPrice / rent[0].daysRented;
+            const delayFee = extra * pricePerDay;
+
+
+            await connection.query(
+                `UPDATE "rentals" SET "returnDate"=$1, "delayFee"=$2 WHERE id= $3;`,
+                [returnDate, delayFee, id]
+            );
+            res.sendStatus(200);
+            return;
+        }
+        await connection.query(
+            `UPDATE "rentals" SET "returnDate"=$1 WHERE id= $2;`,
+            [returnDate, id]
+        );
+
+        res.sendStatus(200);
+        return;
+    } catch (error) {
+        console.log(error);
+        res.sendStatus(500);
+    }
+})
+
+server.delete('/rentals/:id', async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const { rows: rent } = await connection.query(
+            `SELECT "rentDate", "daysRented", "returnDate", "originalPrice"
+                FROM public."rentals" WHERE "id" = $1;`,
+            [id]
+        );
+        if (rent.length === 0) {
+            res.status(404).send({ message: 'rental not found' });
+            return;
+        } else if (rent[0].returnDate === null) {
+            res.status(400).send({ message: 'rental not closed yet' });
+            return;
+        }
+
+        await connection.query(
+            `DELETE FROM public."rentals" WHERE "rentals".id = $1;`,
+            [id]
+        );
+
+        res.sendStatus(200);
         return;
     } catch (error) {
         console.log(error);
